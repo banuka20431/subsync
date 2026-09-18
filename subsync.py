@@ -107,45 +107,6 @@ def setup_logging(verbose: bool) -> logging.Logger:
 logger: logging.Logger = logging.getLogger("SubSync")
 
 
-# --- Text Processing & Encoding ---
-class SubtitleProcessor:
-    """Handles encoding detection, decoding, and subtitle text cleaning."""
-    
-    @staticmethod
-    def decode_content(raw_data: bytes) -> str:
-        if chardet is not None:
-            detected: Dict[str, Any] = chardet.detect(raw_data)
-            encoding: Optional[str] = detected.get('encoding')
-            if encoding:
-                try:
-                    return raw_data.decode(encoding)
-                except UnicodeDecodeError:
-                    pass
-
-        for enc in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']:
-            try:
-                return raw_data.decode(enc)
-            except UnicodeDecodeError:
-                continue
-        
-        return raw_data.decode('utf-8', errors='ignore')
-
-    @staticmethod
-    def clean_text(text: str, remove_hi: bool = True, remove_html: bool = True, fix_ocr: bool = True) -> str:
-        if remove_html:
-            text = re.sub(r'<[^>]+>', '', text)
-            
-        if remove_hi:
-            text = re.sub(r'\[.*?\]', '', text)
-            text = re.sub(r'\(.*?\)', '', text)
-            text = re.sub(r'(?m)^-\s*$', '', text)
-
-        if fix_ocr:
-            text = re.sub(r'\bl\b', 'I', text)
-            text = re.sub(r'\|', 'I', text)
-            
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        return text.strip()
 
 
 # --- Core Utilities ---
@@ -220,6 +181,59 @@ class VideoMetadata:
                 
         return data
 
+# --- Text Processing & Encoding ---
+class SubtitleProcessor:
+    """Handles encoding detection, decoding, and subtitle text cleaning."""
+    
+    @staticmethod
+    def decode_content(raw_data: bytes) -> str:
+        if chardet is not None:
+            detected: Dict[str, Any] = chardet.detect(raw_data)
+            encoding: Optional[str] = detected.get('encoding')
+            if encoding:
+                try:
+                    return raw_data.decode(encoding)
+                except UnicodeDecodeError:
+                    pass
+
+        for enc in ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']:
+            try:
+                return raw_data.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        
+        return raw_data.decode('utf-8', errors='ignore')
+
+    @staticmethod
+    def clean_text(text: str, remove_hi: bool = True, remove_html: bool = True, fix_ocr: bool = True) -> str:
+        # Strip all carriage returns early to ensure regex behaves predictably
+        text = text.replace('\r', '')
+        
+        if remove_html:
+            text = re.sub(r'<[^>]+>', '', text)
+            
+        if remove_hi:
+            text = re.sub(r'\[.*?\]', '', text)
+            text = re.sub(r'\(.*?\)', '', text)
+            text = re.sub(r'(?m)^-\s*$', '', text)
+            # Catch musical note symbols and enclosed lyrics
+            text = re.sub(r'♪.*?♪', '', text, flags=re.DOTALL)
+            text = re.sub(r'♪', '', text)
+
+        if fix_ocr:
+            text = re.sub(r'\bl\b', 'I', text)
+            text = re.sub(r'\|', 'I', text)
+            
+        # Clean up excessive blank lines left by tag removal
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        # BUG FIX: Remove orphaned subtitle blocks (Index + Timestamp but no text)
+        text = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n(?=\n|$)', '', text)
+        
+        # Final formatting pass to ensure strict double-newline spacing
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text.strip() + '\n'
+
 
 # --- Sync / Shift Engine ---
 class SubtitleSyncer:
@@ -253,6 +267,9 @@ class SubtitleSyncer:
                 
             text: str = SubtitleProcessor.decode_content(raw_data)
             
+            # BUG FIX: Strip invisible carriage returns entirely to prevent '\r\r\n' doubling on Windows
+            text = text.replace('\r', '')
+            
             if clean:
                 text = SubtitleProcessor.clean_text(text)
                 
@@ -279,6 +296,7 @@ class SubtitleSyncer:
                 else:
                     shifted_lines.append(line)
 
+            # Python will automatically translate the standard '\n' back to a clean '\r\n' on Windows
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.writelines(shifted_lines)
                 
@@ -288,7 +306,6 @@ class SubtitleSyncer:
         except Exception as e:
             logger.error(f"Failed to sync subtitle: {e}")
             return False
-
 
 # --- AI Generation Engine (Optimized CPU via faster-whisper) ---
 class SubtitleGenerator:
